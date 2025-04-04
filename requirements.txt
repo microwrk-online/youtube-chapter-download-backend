@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+yt-dlp
+sse-starlette
+pydantic
+python-multipart
+ffmpeg-python
+gunicorn
