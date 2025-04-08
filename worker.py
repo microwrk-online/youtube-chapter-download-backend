@@ -13,7 +13,6 @@ from pydantic import BaseModel
 import yt_dlp
 import shutil
 
-
 app = FastAPI()
 
 app.add_middleware(
@@ -118,12 +117,11 @@ def split_video_by_chapters(input_path: str, chapters: List[Dict], output_dir: s
         start_time = chapter['start_time']
         end_time = chapter.get('end_time')
         title = chapter.get('title', f'Chapter {i}')
-
         clean_title = "".join(c if c.isalnum() else "_" for c in title)
+
         mp4_output_path = os.path.join(output_dir, f"{i}_{clean_title}.mp4")
         mp3_output_path = os.path.join(output_dir, f"{i}_{clean_title}.mp3")
 
-        # Extract video chapter
         mp4_cmd = [
             'ffmpeg',
             '-i', input_path,
@@ -139,7 +137,6 @@ def split_video_by_chapters(input_path: str, chapters: List[Dict], output_dir: s
         try:
             subprocess.run(mp4_cmd, check=True)
 
-            # Convert to MP3
             mp3_cmd = [
                 'ffmpeg',
                 '-i', mp4_output_path,
@@ -162,7 +159,7 @@ def split_video_by_chapters(input_path: str, chapters: List[Dict], output_dir: s
             })
 
         except subprocess.CalledProcessError as e:
-            print(f"Error processing chapter {i}: {e.stderr}")
+            print(f"Error processing chapter {i}: {e}")
 
     return output_files
 
