@@ -1,163 +1,245 @@
+import random
 import os
-import shutil
 import uuid
-import yt_dlp
 import subprocess
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel
+import time
+from pathlib import Path
 from typing import List, Dict, Optional
-from datetime import timedelta
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from sse_starlette.sse import EventSourceResponse
+from pydantic import BaseModel
+import yt_dlp
+import shutil
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-TEMP_DIR = "temp"
-os.makedirs(TEMP_DIR, exist_ok=True)
+class VideoRequest(BaseModel):
+    url: str
 
-class LinkRequest(BaseModel):
-    link: str
+def random_progress_message(step: str) -> str:
+    messages = {
+        "download": [
+            "Initializing video download...",
+            "Fetching video, please wait...",
+            "Downloading the video now...",
+            "Video download in progress...",
+            "Preparing video for download...",
+            "Connecting to video server..."
+        ],
+        "video_analysis": [
+            "Analyzing video metadata...",
+            "Fetching video details...",
+            "Analyzing video content...",
+            "Extracting video data...",
+            "Parsing video information...",
+            "Looking for video metadata..."
+        ],
+        "chapter_extraction": [
+            "Extracting chapters from the video...",
+            "Identifying video chapters...",
+            "Chapter extraction in progress...",
+            "Preparing chapter split...",
+            "Scanning video for chapters...",
+            "Analyzing chapter markers..."
+        ],
+        "file_conversion": [
+            "Converting video to MP3...",
+            "Preparing audio conversion...",
+            "Converting video into MP3 format...",
+            "Video to MP3 conversion starting...",
+            "Converting video to high-quality MP3...",
+            "Starting conversion to MP3..."
+        ],
+    }
+    return random.choice(messages.get(step, ["Processing..."]))
 
-def clean_temp_directory(max_dirs=10):
-    folders = [f for f in os.listdir(TEMP_DIR) if os.path.isdir(os.path.join(TEMP_DIR, f))]
-    folders.sort(key=lambda f: os.path.getctime(os.path.join(TEMP_DIR, f)))
+def get_video_info(url: str) -> Optional[Dict]:
+    print(random_progress_message("video_analysis"))
+    ydl_opts = {
+        'quiet': True,
+        'extract_flat': False,
+        'no_warnings': True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    except Exception as e:
+        print(f"Error fetching video info: {e}")
+        return None
 
-    while len(folders) > max_dirs:
-        oldest = folders.pop(0)
-        shutil.rmtree(os.path.join(TEMP_DIR, oldest))
+def get_video_chapters(url: str) -> Optional[List[Dict]]: 
+    info = get_video_info(url)
+    if info and 'chapters' in info:
+        return info['chapters']
+    return None
 
-def get_chapters(video_info) -> List[Dict[str, Optional[str]]]:
-    chapters = video_info.get("chapters", [])
-    result = []
-    for i, chapter in enumerate(chapters):
-        start_time = chapter.get("start_time")
-        end_time = chapters[i + 1]["start_time"] if i + 1 < len(chapters) else None
-        title = chapter.get("title", f"Chapter {i + 1}")
-        result.append({
-            "title": title,
-            "start_time": start_time,
-            "end_time": end_time
-        })
-    return result
+def download_video(url: str, temp_dir: str) -> Optional[str]:
+    print(random_progress_message("download"))
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': os.path.join(temp_dir, 'full_video.%(ext)s'),
+        'quiet': True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            return ydl.prepare_filename(info)
+    except Exception as e:
+        print(f"Error downloading video: {e}")
+        return None
 
-def get_file_size(path: str) -> float:
-    return round(os.path.getsize(path) / (1024 * 1024), 2)
+def get_file_size(filepath: str) -> str:
+    size_bytes = os.path.getsize(filepath)
+    size_mb = size_bytes / (1024 * 1024)
+    return f"{size_mb:.2f} MB"
 
-def get_duration(start: float, end: Optional[float]) -> str:
-    if end is None:
-        return "Unknown"
-    duration = int(end - start)
-    return str(timedelta(seconds=duration))
+def get_duration(start: float, end: float) -> str:
+    duration = end - start
+    hours = int(duration // 3600)
+    minutes = int((duration % 3600) // 60)
+    seconds = int(duration % 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
 
 def split_video_by_chapters(input_path: str, chapters: List[Dict], output_dir: str) -> List[Dict]:
+    print(random_progress_message("chapter_extraction"))
     output_files = []
 
     for i, chapter in enumerate(chapters, 1):
         start_time = chapter['start_time']
         end_time = chapter.get('end_time')
         title = chapter.get('title', f'Chapter {i}')
-        clean_title = "".join(c if c.isalnum() else "_" for c in title)[:80]
+        clean_title = "".join(c if c.isalnum() else "_" for c in title)
 
         mp4_output_path = os.path.join(output_dir, f"{i}_{clean_title}.mp4")
         mp3_output_path = os.path.join(output_dir, f"{i}_{clean_title}.mp3")
 
-        cmd_mp4 = [
-            'ffmpeg', '-y', '-i', input_path,
+        mp4_cmd = [
+            'ffmpeg',
+            '-i', input_path,
             '-ss', str(start_time),
-            '-c', 'copy', '-avoid_negative_ts', '1'
+            '-to', str(end_time) if end_time else None,
+            '-c', 'copy',
+            '-avoid_negative_ts', '1',
+            '-y',
+            mp4_output_path
         ]
-
-        if end_time:
-            cmd_mp4.extend(['-to', str(end_time)])
-
-        cmd_mp4.append(mp4_output_path)
+        mp4_cmd = [arg for arg in mp4_cmd if arg is not None]
 
         try:
-            subprocess.run(cmd_mp4, check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"Error splitting MP4 chapter {i}: {e}")
-            continue
+            subprocess.run(mp4_cmd, check=True)
 
-        try:
-            subprocess.run(['ffmpeg', '-y', '-i', mp4_output_path, '-vn', '-acodec', 'libmp3lame', mp3_output_path], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"Error converting chapter {i} to MP3: {e}")
+            mp3_cmd = [
+                'ffmpeg',
+                '-i', mp4_output_path,
+                '-vn',
+                '-acodec', 'libmp3lame',
+                '-q:a', '2',
+                '-y',
+                mp3_output_path
+            ]
+            subprocess.run(mp3_cmd, check=True)
 
-        output_files.append({
-            "path": mp4_output_path,
-            "size": get_file_size(mp4_output_path),
-            "duration": get_duration(start_time, end_time),
-            "mp4_download_url": f"/api/download/{os.path.basename(output_dir)}/{os.path.basename(mp4_output_path)}",
-            "mp3_download_url": f"/api/download/{os.path.basename(output_dir)}/{os.path.basename(mp3_output_path)}"
-        })
+            size = get_file_size(mp4_output_path)
+            duration = get_duration(start_time, end_time)
+
+            output_files.append({
+                "path": mp4_output_path,
+                "mp3_path": mp3_output_path,
+                "size": size,
+                "duration": duration
+            })
+
+        except subprocess.CalledProcessError as e:
+            print(f"Error processing chapter {i}: {e}")
 
     return output_files
 
+@app.get("/api/extract-progress/{url}")
+async def extract_video_progress(url: str):
+    def event_generator():
+        yield f"data: {random_progress_message('download')}\n\n"
+        time.sleep(2)
+        yield f"data: {random_progress_message('video_analysis')}\n\n"
+        time.sleep(2)
+        yield f"data: {random_progress_message('chapter_extraction')}\n\n"
+        time.sleep(2)
+        yield f"data: {random_progress_message('file_conversion')}\n\n"
+        time.sleep(2)
+    return EventSourceResponse(event_generator())
+
 @app.post("/api/extract")
-async def extract(request: LinkRequest):
-    clean_temp_directory()
+async def api_extract_chapters(request: VideoRequest):  
+    temp_dir = os.path.join("temp", str(uuid.uuid4()))
+    os.makedirs(temp_dir, exist_ok=True)
 
-    link = request.link
-    uid = str(uuid.uuid4())
-    output_dir = os.path.join(TEMP_DIR, uid)
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, "full_video.%(ext)s")
+    try:
+        chapters = get_video_chapters(request.url)
+        if not chapters:
+            raise HTTPException(status_code=400, detail="No chapters found in this video")
 
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': output_path,
-        'merge_output_format': 'mp4',
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'cookiefile': 'cookies.txt'
-    }
+        video_info = get_video_info(request.url)
+        if not video_info:
+            raise HTTPException(status_code=500, detail="Failed to fetch video info")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            info_dict = ydl.extract_info(link, download=True)
-            downloaded_filename = ydl.prepare_filename(info_dict).replace(".webm", ".mp4").replace(".mkv", ".mp4")
-            chapters = get_chapters(info_dict)
-            
-            if not chapters:
-                raise HTTPException(status_code=400, detail="No chapters found in the video.")
+        video_title = video_info.get('title', 'No Title Found')
+        video_thumbnail = video_info.get('thumbnail', '')
 
-            files = split_video_by_chapters(downloaded_filename, chapters, output_dir)
+        video_path = download_video(request.url, temp_dir)
+        if not video_path:
+            raise HTTPException(status_code=500, detail="Failed to download video")
 
-            thumbnail_url = info_dict.get("thumbnail")
-            if thumbnail_url:
-                thumbnail_path = os.path.join(output_dir, "thumbnail.jpg")
-                subprocess.run(["curl", "-s", "-o", thumbnail_path, thumbnail_url], check=True)
+        chapter_files = split_video_by_chapters(video_path, chapters, temp_dir)
 
-            return JSONResponse({
-                "videoId": uid,
-                "title": info_dict.get("title", "Untitled"),
-                "thumbnail": thumbnail_url or "",
-                "chapters": files
-            })
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "title": video_title,
+            "thumbnail": video_thumbnail,
+            "chapters": [
+                {
+                    "title": chapter["title"],
+                    "start_time": chapter["start_time"],
+                    "end_time": chapter.get("end_time"),
+                    "size": file["size"],
+                    "duration": file["duration"],
+                    "mp4_download_url": f"/api/download/{os.path.basename(temp_dir)}/{os.path.basename(file['path'])}",
+                    "mp3_download_url": f"/api/download/{os.path.basename(temp_dir)}/{os.path.basename(file['mp3_path'])}"
+                }
+                for chapter, file in zip(chapters, chapter_files)
+            ]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/download/{temp_dir}/{filename}")
-async def download_file(temp_dir: str, filename: str):
-    path = os.path.join(TEMP_DIR, temp_dir, filename)
-    if not os.path.exists(path):
+async def download_chapter(temp_dir: str, filename: str):
+    file_path = os.path.join("temp", temp_dir, filename)
+    if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
-
-    media_type = "video/mp4" if filename.endswith(".mp4") else "audio/mpeg"
-    return FileResponse(path, media_type=media_type, filename=filename)
+    media_type = 'audio/mp3' if filename.endswith(".mp3") else 'video/mp4'
+    return FileResponse(file_path, media_type=media_type, filename=filename)
 
 @app.get("/api/download/thumbnail/{temp_dir}")
 async def download_thumbnail(temp_dir: str):
-    path = os.path.join(TEMP_DIR, temp_dir, "thumbnail.jpg")
-    if not os.path.exists(path):
+    file_path = os.path.join("temp", temp_dir, "thumbnail.jpg")
+    if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Thumbnail not found")
-    return FileResponse(path, media_type="image/jpeg", filename="thumbnail.jpg")
+    return FileResponse(file_path, media_type='image/jpeg', filename="thumbnail.jpg")
+
+def clean_temp_folder(temp_root="temp", max_folders=10):
+    if not os.path.exists(temp_root):
+        return
+    folders = [os.path.join(temp_root, d) for d in os.listdir(temp_root) if os.path.isdir(os.path.join(temp_root, d))]
+    folders.sort(key=lambda x: os.path.getctime(x))
+    while len(folders) > max_folders:
+        oldest = folders.pop(0)
+        shutil.rmtree(oldest)
+        print(f"Deleted folder: {oldest}")

@@ -1,8 +1,8 @@
-import random
 import os
 import uuid
 import subprocess
 import time
+import shutil
 from pathlib import Path
 from typing import List, Dict, Optional
 from fastapi import FastAPI, HTTPException
@@ -11,7 +11,6 @@ from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 import yt_dlp
-import shutil
 
 app = FastAPI()
 
@@ -25,49 +24,13 @@ app.add_middleware(
 class VideoRequest(BaseModel):
     url: str
 
-def random_progress_message(step: str) -> str:
-    messages = {
-        "download": [
-            "Initializing video download...",
-            "Fetching video, please wait...",
-            "Downloading the video now...",
-            "Video download in progress...",
-            "Preparing video for download...",
-            "Connecting to video server..."
-        ],
-        "video_analysis": [
-            "Analyzing video metadata...",
-            "Fetching video details...",
-            "Analyzing video content...",
-            "Extracting video data...",
-            "Parsing video information...",
-            "Looking for video metadata..."
-        ],
-        "chapter_extraction": [
-            "Extracting chapters from the video...",
-            "Identifying video chapters...",
-            "Chapter extraction in progress...",
-            "Preparing chapter split...",
-            "Scanning video for chapters...",
-            "Analyzing chapter markers..."
-        ],
-        "file_conversion": [
-            "Converting video to MP3...",
-            "Preparing audio conversion...",
-            "Converting video into MP3 format...",
-            "Video to MP3 conversion starting...",
-            "Converting video to high-quality MP3...",
-            "Starting conversion to MP3..."
-        ],
-    }
-    return random.choice(messages.get(step, ["Processing..."]))
-
 def get_video_info(url: str) -> Optional[Dict]:
-    print(random_progress_message("video_analysis"))
+    print("Fetching video metadata...")
     ydl_opts = {
         'quiet': True,
         'extract_flat': False,
         'no_warnings': True,
+        'cookiefile': 'cookies.txt'
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -76,18 +39,22 @@ def get_video_info(url: str) -> Optional[Dict]:
         print(f"Error fetching video info: {e}")
         return None
 
+
+
 def get_video_chapters(url: str) -> Optional[List[Dict]]: 
+    print("Checking for video chapters...")
     info = get_video_info(url)
     if info and 'chapters' in info:
         return info['chapters']
     return None
 
 def download_video(url: str, temp_dir: str) -> Optional[str]:
-    print(random_progress_message("download"))
+    print("Downloading full video...")
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': os.path.join(temp_dir, 'full_video.%(ext)s'),
         'quiet': True,
+        'cookiefile': 'cookies.txt'
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -96,6 +63,7 @@ def download_video(url: str, temp_dir: str) -> Optional[str]:
     except Exception as e:
         print(f"Error downloading video: {e}")
         return None
+
 
 def get_file_size(filepath: str) -> str:
     size_bytes = os.path.getsize(filepath)
@@ -110,7 +78,7 @@ def get_duration(start: float, end: float) -> str:
     return f"{hours:02}:{minutes:02}:{seconds:02}"
 
 def split_video_by_chapters(input_path: str, chapters: List[Dict], output_dir: str) -> List[Dict]:
-    print(random_progress_message("chapter_extraction"))
+    print("Splitting video by chapters and converting to MP3...")
     output_files = []
 
     for i, chapter in enumerate(chapters, 1):
@@ -166,13 +134,13 @@ def split_video_by_chapters(input_path: str, chapters: List[Dict], output_dir: s
 @app.get("/api/extract-progress/{url}")
 async def extract_video_progress(url: str):
     def event_generator():
-        yield f"data: {random_progress_message('download')}\n\n"
+        yield f"data: Downloading video...\n\n"
         time.sleep(2)
-        yield f"data: {random_progress_message('video_analysis')}\n\n"
+        yield f"data: Fetching video metadata...\n\n"
         time.sleep(2)
-        yield f"data: {random_progress_message('chapter_extraction')}\n\n"
+        yield f"data: Extracting chapters...\n\n"
         time.sleep(2)
-        yield f"data: {random_progress_message('file_conversion')}\n\n"
+        yield f"data: Converting chapters to MP3...\n\n"
         time.sleep(2)
     return EventSourceResponse(event_generator())
 
